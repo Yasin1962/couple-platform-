@@ -1,0 +1,1097 @@
+import { useState, useEffect, useRef, useCallback } from "react";
+
+/* ═══════════════════════════════════════════════════════════
+   LOVEPLAY — Long Distance Couple Game Platform
+   Real multiplayer via persistent storage polling
+   AI-powered questions & judging via Claude API
+═══════════════════════════════════════════════════════════ */
+
+// ── THEME ────────────────────────────────────────────────────
+const T = {
+  bg:      "#0d0815",
+  surface: "#16102a",
+  card:    "#1e1535",
+  border:  "rgba(200,160,255,.12)",
+  rose:    "#f0426a",
+  violet:  "#9b59f5",
+  gold:    "#f5c842",
+  blush:   "#ffaac8",
+  mint:    "#42e8c4",
+  text:    "#f0eaff",
+  muted:   "rgba(240,234,255,.45)",
+  dim:     "rgba(240,234,255,.2)",
+};
+
+const AVATARS = ["🦋","🌸","🐝","🦊","🐼","🦁","🌙","⭐","🌺","🐬","🦄","🍓"];
+
+const GAMES = [
+  { id:"trivia",   icon:"🧠", name:"Know Your Partner",  tag:"Trivia",    color:T.rose,   desc:"Predict each other's answers" },
+  { id:"wouldyou", icon:"💭", name:"Would You Rather",   tag:"Fun",       color:T.violet, desc:"Reveal your true preferences" },
+  { id:"dare",     icon:"🎲", name:"Dare or Deeper",     tag:"Challenge", color:"#f59e0b",desc:"Playful dares & deep questions" },
+  { id:"complete", icon:"✍️", name:"Finish My Sentence", tag:"Creative",  color:T.mint,   desc:"Complete sentences about love" },
+  { id:"rating",   icon:"⭐", name:"Rate Together",      tag:"Romantic",  color:T.gold,   desc:"Rate life moments 1 to 10" },
+  { id:"memory",   icon:"💌", name:"Our Love Story",     tag:"Romantic",  color:T.blush,  desc:"Relive your shared memories" },
+];
+
+// ── STORAGE HELPERS ──────────────────────────────────────────
+async function storeSet(key, val, shared = true) {
+  try { await window.storage.set(key, JSON.stringify(val), shared); } catch {}
+}
+async function storeGet(key, shared = true) {
+  try {
+    const r = await window.storage.get(key, shared);
+    return r ? JSON.parse(r.value) : null;
+  } catch { return null; }
+}
+async function storeDel(key, shared = true) {
+  try { await window.storage.delete(key, shared); } catch {}
+}
+
+function makeCode() {
+  return Math.random().toString(36).slice(2, 8).toUpperCase();
+}
+
+// ── CLAUDE API ───────────────────────────────────────────────
+async function claude(system, user, maxTokens = 600) {
+  try {
+    const r = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: maxTokens,
+        system,
+        messages: [{ role: "user", content: user }],
+      }),
+    });
+    const d = await r.json();
+    return d.content?.[0]?.text || "";
+  } catch { return ""; }
+}
+
+async function genQuestion(gameId, round, used = []) {
+  const map = {
+    trivia:   `Generate ONE couples trivia question asking one partner to predict the other's answer. JSON: {"question":"...","hint":"...","category":"..."}`,
+    wouldyou: `Generate ONE "Would You Rather" dilemma for couples. JSON: {"question":"Would you rather...","optionA":"...","optionB":"...","theme":"..."}`,
+    dare:     `Generate ONE fun romantic dare or deep question for couples. JSON: {"dare":"...","type":"Action|Question|Challenge","vibe":"..."}`,
+    complete: `Generate ONE sentence starter about love/relationships. JSON: {"starter":"...","theme":"...","example":"..."}`,
+    rating:   `Generate ONE life/relationship scenario for couples to rate 1-10. JSON: {"scenario":"...","context":"...","category":"..."}`,
+    memory:   `Generate ONE prompt for couples to recall a shared memory. JSON: {"prompt":"...","category":"...","followUp":"..."}`,
+  };
+  const sys = `You are a fun couples game host. ${map[gameId]||map.trivia} Avoid duplicates. Return ONLY valid JSON, no markdown. Already used: ${used.slice(-5).join("; ")}`;
+  const raw = await claude(sys, `Round ${round}. New unique question please.`);
+  try { return JSON.parse(raw.replace(/```json|```/g,"")); } catch { return null; }
+}
+
+async function judgeRound(gameId, q, a1, a2, name1, name2) {
+  const sys = `You are a warm, fun couples game judge. Compare two answers and respond ONLY as JSON:
+{"scoreA":0-10,"scoreB":0-10,"reaction":"1-2 fun warm sentences","insight":"1 sweet insight about this couple","winner":"p1|p2|tie"}
+Be playful, never negative. Celebrate their uniqueness.`;
+  const raw = await claude(sys, `Game: ${gameId}\nQuestion: ${JSON.stringify(q)}\n${name1} answered: "${a1}"\n${name2} answered: "${a2}"`);
+  try { return JSON.parse(raw.replace(/```json|```/g,"")); }
+  catch { return { scoreA:7, scoreB:7, reaction:"Amazing answers, both of you! 💕", insight:"You two are perfectly in sync!", winner:"tie" }; }
+}
+
+async function genFinalStory(name1, name2, gameName, score1, score2, rounds) {
+  const recap = rounds.map((r,i)=>`R${i+1}: "${r.a1}" vs "${r.a2}"`).join(" | ");
+  return await claude(
+    "You are a poetic couples game narrator. Write a beautiful 3-sentence love story summary of how this couple played together. Be warm, specific, and celebratory.",
+    `Game: ${gameName}. ${name1}(${score1}pts) vs ${name2}(${score2}pts). Highlights: ${recap}`,
+    400
+  );
+}
+
+// ── CSS ANIMATIONS ───────────────────────────────────────────
+const CSS = `
+  @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700;900&family=DM+Sans:wght@300;400;500;600&display=swap');
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'DM Sans',sans-serif}
+  @keyframes fadeUp{from{opacity:0;transform:translateY(24px)}to{opacity:1;transform:translateY(0)}}
+  @keyframes popIn{from{opacity:0;transform:scale(.85)}to{opacity:1;transform:scale(1)}}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+  @keyframes heartbeat{0%,100%{transform:scale(1)}50%{transform:scale(1.18)}}
+  @keyframes shimmer{0%{background-position:-200% center}100%{background-position:200% center}}
+  @keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-12px)}}
+  @keyframes bgShift{0%{background-position:0% 50%}50%{background-position:100% 50%}100%{background-position:0% 50%}}
+  @keyframes starFloat{0%{opacity:0;transform:translateY(100vh) rotate(0deg)}15%{opacity:.7}85%{opacity:.3}100%{opacity:0;transform:translateY(-20vh) rotate(360deg)}}
+  .fadeUp{animation:fadeUp .5s ease both}
+  .popIn{animation:popIn .4s ease both}
+  .spin{animation:spin 1s linear infinite}
+  .heartbeat{animation:heartbeat 1.4s ease-in-out infinite}
+  .float{animation:float 3s ease-in-out infinite}
+  input:focus,textarea:focus{outline:none}
+  input::placeholder,textarea::placeholder{color:rgba(240,234,255,.3)}
+  ::-webkit-scrollbar{width:4px}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:rgba(155,89,245,.3);border-radius:2px}
+  .glow-rose{box-shadow:0 0 30px rgba(240,66,106,.3)}
+  .glow-violet{box-shadow:0 0 30px rgba(155,89,245,.3)}
+  .shimmer-text{background:linear-gradient(90deg,${T.blush},${T.gold},${T.violet},${T.blush});background-size:200%;-webkit-background-clip:text;-webkit-text-fill-color:transparent;animation:shimmer 3s linear infinite}
+  .chat-bubble-in{animation:fadeUp .3s ease both}
+  .online-dot{width:9px;height:9px;background:#42e84a;border-radius:50%;display:inline-block;box-shadow:0 0 8px #42e84a;animation:pulse 1.5s ease-in-out infinite}
+  .waiting-dot{width:9px;height:9px;background:${T.gold};border-radius:50%;display:inline-block;animation:pulse 1s ease-in-out infinite}
+  input[type=range]{-webkit-appearance:none;height:6px;border-radius:3px;background:rgba(255,255,255,.15)}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;border-radius:50%;cursor:pointer;border:2px solid white}
+`;
+
+// ── FLOATING PARTICLES ────────────────────────────────────────
+function Particles() {
+  const items = Array.from({length:18},(_,i)=>({
+    id:i, x:Math.random()*100, size:Math.random()*14+8,
+    speed:Math.random()*8+5, delay:Math.random()*6,
+    em:["♥","💕","✨","💫","🌸","⭐","💖"][Math.floor(Math.random()*7)],
+  }));
+  return (
+    <div style={{position:"fixed",inset:0,pointerEvents:"none",zIndex:0,overflow:"hidden"}}>
+      {items.map(p=>(
+        <div key={p.id} style={{
+          position:"absolute",left:`${p.x}%`,bottom:-50,fontSize:p.size,
+          animation:`starFloat ${p.speed}s ${p.delay}s ease-in infinite`,opacity:0,
+        }}>{p.em}</div>
+      ))}
+    </div>
+  );
+}
+
+// ── SHARED UI ─────────────────────────────────────────────────
+function Btn({children,onClick,color=T.violet,disabled,style:sx={},outline,sm,full}){
+  const [hov,setHov]=useState(false);
+  const base={
+    background: outline ? "transparent" : hov ? color : `${color}cc`,
+    border: `2px solid ${color}`,
+    color: outline ? (hov ? T.bg : color) : "white",
+    borderRadius:50,padding:sm?"0.45rem 1.1rem":"0.7rem 2rem",
+    fontWeight:700,fontSize:sm?".82rem":"0.95rem",cursor:disabled?"not-allowed":"pointer",
+    opacity:disabled?.45:1,transition:"all .2s",width:full?"100%":undefined,
+    fontFamily:"'DM Sans',sans-serif",letterSpacing:.3,
+    ...sx,
+  };
+  return <button style={base} onClick={disabled?undefined:onClick} onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)}>{children}</button>;
+}
+
+function Card({children,style:sx={},glow}){
+  return <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:20,padding:"1.8rem",backdropFilter:"blur(16px)",...(glow?{boxShadow:`0 0 40px ${glow}25`}:{}),...sx}}>{children}</div>;
+}
+
+function Input({label,value,onChange,placeholder,type="text",style:sx={}}){
+  const [focused,setFocused]=useState(false);
+  return (
+    <div style={{marginBottom:"1.2rem"}}>
+      {label&&<div style={{color:T.blush,fontSize:".82rem",fontWeight:700,marginBottom:".4rem",letterSpacing:.5}}>{label}</div>}
+      <input
+        type={type} value={value} onChange={e=>onChange(e.target.value)}
+        placeholder={placeholder}
+        onFocus={()=>setFocused(true)} onBlur={()=>setFocused(false)}
+        style={{width:"100%",background:"rgba(255,255,255,.07)",border:`2px solid ${focused?T.violet:"rgba(255,255,255,.12)"}`,borderRadius:12,padding:".8rem 1.1rem",color:T.text,fontSize:"1rem",fontFamily:"'DM Sans',sans-serif",transition:"border-color .2s",...sx}}
+      />
+    </div>
+  );
+}
+
+function Spinner({color=T.violet,size=36}){
+  return <div className="spin" style={{width:size,height:size,border:`3px solid ${color}20`,borderTop:`3px solid ${color}`,borderRadius:"50%"}} />;
+}
+
+function Tag({children,color}){
+  return <span style={{background:`${color}20`,color,border:`1px solid ${color}50`,borderRadius:50,padding:".2rem .7rem",fontSize:".72rem",fontWeight:700,letterSpacing:.5}}>{children}</span>;
+}
+
+// ── CHAT PANEL ────────────────────────────────────────────────
+function ChatPanel({roomCode,myName,partnerName,myAvatar}){
+  const [msgs,setMsgs]=useState([]);
+  const [draft,setDraft]=useState("");
+  const [sending,setSending]=useState(false);
+  const bottomRef=useRef();
+  const pollRef=useRef();
+
+  const loadMsgs=useCallback(async()=>{
+    const data=await storeGet(`room:${roomCode}:chat`);
+    if(data&&Array.isArray(data)) setMsgs(data);
+  },[roomCode]);
+
+  useEffect(()=>{
+    loadMsgs();
+    pollRef.current=setInterval(loadMsgs,2500);
+    return()=>clearInterval(pollRef.current);
+  },[loadMsgs]);
+
+  useEffect(()=>{ bottomRef.current?.scrollIntoView({behavior:"smooth"}); },[msgs]);
+
+  const send=async()=>{
+    if(!draft.trim()||sending) return;
+    setSending(true);
+    const newMsg={id:Date.now(),from:myName,avatar:myAvatar,text:draft.trim(),ts:Date.now()};
+    const current=await storeGet(`room:${roomCode}:chat`)||[];
+    const updated=[...current,newMsg].slice(-60);
+    await storeSet(`room:${roomCode}:chat`,updated);
+    setMsgs(updated);
+    setDraft("");
+    setSending(false);
+  };
+
+  const isMe=n=>n===myName;
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",height:"100%",minHeight:300}}>
+      <div style={{color:T.muted,fontSize:".8rem",fontWeight:600,padding:"0 0 .8rem",letterSpacing:.5,textTransform:"uppercase"}}>
+        💬 Chat with {partnerName||"your partner"}
+      </div>
+      <div style={{flex:1,overflowY:"auto",display:"flex",flexDirection:"column",gap:".6rem",paddingRight:4,marginBottom:".8rem",maxHeight:260}}>
+        {msgs.length===0&&<div style={{color:T.dim,fontSize:".85rem",textAlign:"center",marginTop:"2rem"}}>Send a message to your partner 💕</div>}
+        {msgs.map(m=>(
+          <div key={m.id} className="chat-bubble-in" style={{display:"flex",flexDirection:isMe(m.from)?"row-reverse":"row",gap:".5rem",alignItems:"flex-end"}}>
+            <span style={{fontSize:"1.1rem"}}>{m.avatar}</span>
+            <div style={{
+              background:isMe(m.from)?`linear-gradient(135deg,${T.violet},${T.rose})`:"rgba(255,255,255,.08)",
+              borderRadius:isMe(m.from)?"18px 18px 4px 18px":"18px 18px 18px 4px",
+              padding:".5rem .9rem",maxWidth:"72%",
+              color:T.text,fontSize:".9rem",lineHeight:1.5,
+            }}>
+              {m.text}
+            </div>
+          </div>
+        ))}
+        <div ref={bottomRef}/>
+      </div>
+      <div style={{display:"flex",gap:".5rem"}}>
+        <input
+          value={draft} onChange={e=>setDraft(e.target.value)}
+          onKeyDown={e=>e.key==="Enter"&&!e.shiftKey&&send()}
+          placeholder="Type a message... 💕"
+          style={{flex:1,background:"rgba(255,255,255,.07)",border:`1px solid rgba(255,255,255,.12)`,borderRadius:50,padding:".6rem 1rem",color:T.text,fontSize:".9rem",fontFamily:"'DM Sans',sans-serif"}}
+        />
+        <Btn onClick={send} disabled={!draft.trim()||sending} style={{borderRadius:50,padding:".6rem 1.2rem"}} sm>
+          {sending?"…":"→"}
+        </Btn>
+      </div>
+    </div>
+  );
+}
+
+// ── ROOM STATE HELPERS ────────────────────────────────────────
+// Room schema stored in shared storage:
+// room:{code}:state = { host, guest, status, game, round, phase, question, answers:{p1,p2}, scores:{p1,p2}, judgment, history, usedQs, winner, story }
+
+async function getRoom(code){ return await storeGet(`room:${code}:state`); }
+async function setRoom(code,data){ await storeSet(`room:${code}:state`,data); }
+
+// ══════════════════════════════════════════════════════════════
+//  SCREENS
+// ══════════════════════════════════════════════════════════════
+
+// ── HOME ──────────────────────────────────────────────────────
+function HomeScreen({onHost,onJoin}){
+  return (
+    <div style={{maxWidth:520,margin:"0 auto",padding:"2.5rem 1rem",animation:"fadeUp .5s ease"}}>
+      <div style={{textAlign:"center",marginBottom:"3rem"}}>
+        <div className="heartbeat" style={{fontSize:"4rem",marginBottom:"1rem"}}>💑</div>
+        <h1 className="shimmer-text" style={{fontFamily:"'Playfair Display',serif",fontSize:"clamp(2.2rem,6vw,3.2rem)",fontWeight:900,marginBottom:".6rem"}}>LovePlay</h1>
+        <p style={{color:T.muted,fontSize:"1.05rem",lineHeight:1.7}}>The real-time couple game platform.<br/>Play together no matter the distance. 🌍</p>
+      </div>
+
+      <Card style={{marginBottom:"1.2rem"}} glow={T.rose}>
+        <div style={{fontSize:"1.8rem",marginBottom:".6rem"}}>🎮</div>
+        <div style={{fontFamily:"'Playfair Display',serif",fontSize:"1.3rem",color:"white",fontWeight:700,marginBottom:".4rem"}}>Create a Game Room</div>
+        <p style={{color:T.muted,fontSize:".9rem",marginBottom:"1.2rem",lineHeight:1.6}}>Start a private room and share the code with your partner. They join from anywhere in the world.</p>
+        <Btn onClick={onHost} color={T.rose} full>Create Room →</Btn>
+      </Card>
+
+      <Card glow={T.violet}>
+        <div style={{fontSize:"1.8rem",marginBottom:".6rem"}}>🔗</div>
+        <div style={{fontFamily:"'Playfair Display',serif",fontSize:"1.3rem",color:"white",fontWeight:700,marginBottom:".4rem"}}>Join Partner's Room</div>
+        <p style={{color:T.muted,fontSize:".9rem",marginBottom:"1.2rem",lineHeight:1.6}}>Got a 6-letter code from your partner? Enter it to join their room instantly.</p>
+        <Btn onClick={onJoin} color={T.violet} full>Join Room →</Btn>
+      </Card>
+
+      <div style={{textAlign:"center",marginTop:"2rem",color:T.dim,fontSize:".8rem"}}>
+        ✓ Real-time sync &nbsp;·&nbsp; ✓ AI-powered games &nbsp;·&nbsp; ✓ Live chat &nbsp;·&nbsp; ✓ No download
+      </div>
+    </div>
+  );
+}
+
+// ── HOST SETUP ────────────────────────────────────────────────
+function HostSetupScreen({onCreated,onBack}){
+  const [name,setName]=useState("");
+  const [avatar,setAvatar]=useState(AVATARS[0]);
+  const [creating,setCreating]=useState(false);
+
+  const create=async()=>{
+    if(!name.trim()||creating) return;
+    setCreating(true);
+    const code=makeCode();
+    const room={
+      code, status:"waiting",
+      host:{name:name.trim(),avatar},
+      guest:null,
+      game:null,round:1,phase:"lobby",
+      question:null,answers:{p1:null,p2:null},
+      scores:{p1:0,p2:0},judgment:null,
+      history:[],usedQs:[],winner:null,story:null,
+      createdAt:Date.now(),
+    };
+    await setRoom(code,room);
+    onCreated(code,{name:name.trim(),avatar},"host");
+    setCreating(false);
+  };
+
+  return (
+    <div style={{maxWidth:480,margin:"0 auto",padding:"2rem 1rem",animation:"fadeUp .4s ease"}}>
+      <button onClick={onBack} style={{background:"none",border:"none",color:T.muted,cursor:"pointer",marginBottom:"1.5rem",fontSize:".9rem"}}>← Back</button>
+      <Card glow={T.rose}>
+        <div style={{textAlign:"center",marginBottom:"2rem"}}>
+          <div style={{fontSize:"2.5rem",marginBottom:".5rem"}}>🏠</div>
+          <h2 style={{fontFamily:"'Playfair Display',serif",color:"white",fontSize:"1.6rem",marginBottom:".3rem"}}>Create Your Room</h2>
+          <p style={{color:T.muted,fontSize:".85rem"}}>Your partner will join using your room code</p>
+        </div>
+        <Input label="Your Name" value={name} onChange={setName} placeholder="Enter your name..." />
+        <div style={{marginBottom:"1.5rem"}}>
+          <div style={{color:T.blush,fontSize:".82rem",fontWeight:700,marginBottom:".6rem",letterSpacing:.5}}>Choose Your Avatar</div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:".5rem"}}>
+            {AVATARS.map(a=>(
+              <button key={a} onClick={()=>setAvatar(a)} style={{fontSize:"1.6rem",cursor:"pointer",padding:".35rem",borderRadius:"50%",border:`2px solid ${avatar===a?T.gold:"transparent"}`,background:avatar===a?`${T.gold}20`:"transparent",transition:"all .2s"}}>
+                {a}
+              </button>
+            ))}
+          </div>
+        </div>
+        <Btn onClick={create} disabled={!name.trim()||creating} color={T.rose} full>
+          {creating?<span style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8}}><Spinner size={18} color="white"/>Creating…</span>:"Create Room →"}
+        </Btn>
+      </Card>
+    </div>
+  );
+}
+
+// ── GUEST JOIN ────────────────────────────────────────────────
+function GuestJoinScreen({onJoined,onBack}){
+  const [code,setCode]=useState("");
+  const [name,setName]=useState("");
+  const [avatar,setAvatar]=useState(AVATARS[3]);
+  const [err,setErr]=useState("");
+  const [joining,setJoining]=useState(false);
+
+  const join=async()=>{
+    if(!name.trim()||!code.trim()||joining) return;
+    setJoining(true); setErr("");
+    const room=await getRoom(code.toUpperCase().trim());
+    if(!room){ setErr("Room not found. Check the code and try again."); setJoining(false); return; }
+    if(room.guest){ setErr("This room already has 2 players."); setJoining(false); return; }
+    const updated={...room,guest:{name:name.trim(),avatar},status:"ready"};
+    await setRoom(code.toUpperCase().trim(),updated);
+    onJoined(code.toUpperCase().trim(),{name:name.trim(),avatar},"guest");
+    setJoining(false);
+  };
+
+  return (
+    <div style={{maxWidth:480,margin:"0 auto",padding:"2rem 1rem",animation:"fadeUp .4s ease"}}>
+      <button onClick={onBack} style={{background:"none",border:"none",color:T.muted,cursor:"pointer",marginBottom:"1.5rem",fontSize:".9rem"}}>← Back</button>
+      <Card glow={T.violet}>
+        <div style={{textAlign:"center",marginBottom:"2rem"}}>
+          <div style={{fontSize:"2.5rem",marginBottom:".5rem"}}>🔗</div>
+          <h2 style={{fontFamily:"'Playfair Display',serif",color:"white",fontSize:"1.6rem",marginBottom:".3rem"}}>Join Your Partner</h2>
+          <p style={{color:T.muted,fontSize:".85rem"}}>Enter the 6-letter room code they shared with you</p>
+        </div>
+        <Input label="Room Code" value={code} onChange={v=>setCode(v.toUpperCase())} placeholder="e.g. AB3XYZ" style={{letterSpacing:4,fontWeight:700,textAlign:"center",fontSize:"1.2rem"}} />
+        <Input label="Your Name" value={name} onChange={setName} placeholder="Enter your name..." />
+        <div style={{marginBottom:"1.5rem"}}>
+          <div style={{color:T.blush,fontSize:".82rem",fontWeight:700,marginBottom:".6rem",letterSpacing:.5}}>Choose Your Avatar</div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:".5rem"}}>
+            {AVATARS.map(a=>(
+              <button key={a} onClick={()=>setAvatar(a)} style={{fontSize:"1.6rem",cursor:"pointer",padding:".35rem",borderRadius:"50%",border:`2px solid ${avatar===a?T.gold:"transparent"}`,background:avatar===a?`${T.gold}20`:"transparent",transition:"all .2s"}}>
+                {a}
+              </button>
+            ))}
+          </div>
+        </div>
+        {err&&<div style={{background:"rgba(240,66,106,.12)",border:"1px solid rgba(240,66,106,.3)",borderRadius:10,padding:".8rem",color:"#ff7096",fontSize:".85rem",marginBottom:"1rem"}}>{err}</div>}
+        <Btn onClick={join} disabled={!name.trim()||!code.trim()||joining} color={T.violet} full>
+          {joining?<span style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8}}><Spinner size={18} color="white"/>Joining…</span>:"Join Room →"}
+        </Btn>
+      </Card>
+    </div>
+  );
+}
+
+// ── WAITING ROOM ──────────────────────────────────────────────
+function WaitingRoom({code,me,role,onRoomReady,onLeave}){
+  const [room,setRoomState]=useState(null);
+  const [copied,setCopied]=useState(false);
+  const pollRef=useRef();
+
+  const poll=useCallback(async()=>{
+    const r=await getRoom(code);
+    if(!r) return;
+    setRoomState(r);
+    if(r.status==="ready"||r.guest) onRoomReady(r);
+  },[code,onRoomReady]);
+
+  useEffect(()=>{
+    poll();
+    pollRef.current=setInterval(poll,2000);
+    return()=>clearInterval(pollRef.current);
+  },[poll]);
+
+  const copy=()=>{ navigator.clipboard?.writeText(code).catch(()=>{}); setCopied(true); setTimeout(()=>setCopied(false),2000); };
+
+  return (
+    <div style={{maxWidth:520,margin:"0 auto",padding:"2rem 1rem",animation:"fadeUp .4s ease"}}>
+      <Card glow={T.gold}>
+        <div style={{textAlign:"center",marginBottom:"2rem"}}>
+          <div className="float" style={{fontSize:"3rem",marginBottom:".8rem"}}>⏳</div>
+          <h2 style={{fontFamily:"'Playfair Display',serif",color:"white",fontSize:"1.6rem",marginBottom:".3rem"}}>Waiting for your partner…</h2>
+          <p style={{color:T.muted,fontSize:".9rem"}}>Share this room code with your partner</p>
+        </div>
+
+        <div style={{background:`${T.gold}15`,border:`2px dashed ${T.gold}50`,borderRadius:16,padding:"1.5rem",textAlign:"center",marginBottom:"1.5rem"}}>
+          <div style={{color:T.muted,fontSize:".8rem",fontWeight:600,marginBottom:".5rem",letterSpacing:1,textTransform:"uppercase"}}>Room Code</div>
+          <div style={{fontFamily:"'Playfair Display',serif",fontSize:"3rem",fontWeight:900,color:T.gold,letterSpacing:8}}>{code}</div>
+          <Btn onClick={copy} color={T.gold} sm style={{marginTop:"1rem"}}>{copied?"✓ Copied!":"Copy Code"}</Btn>
+        </div>
+
+        <div style={{display:"flex",gap:"1rem",marginBottom:"1.5rem"}}>
+          <div style={{flex:1,background:"rgba(255,255,255,.05)",borderRadius:12,padding:"1rem",textAlign:"center"}}>
+            <div style={{fontSize:"1.6rem"}}>{me.avatar}</div>
+            <div style={{fontWeight:700,marginTop:".3rem",fontSize:".9rem"}}>{me.name}</div>
+            <div style={{fontSize:".75rem",marginTop:".2rem",display:"flex",alignItems:"center",justifyContent:"center",gap:4}}>
+              <span className="online-dot"/><span style={{color:"#42e84a"}}>You</span>
+            </div>
+          </div>
+          <div style={{display:"flex",alignItems:"center",color:T.gold,fontSize:"1.3rem",fontWeight:900}}>VS</div>
+          <div style={{flex:1,background:"rgba(255,255,255,.05)",borderRadius:12,padding:"1rem",textAlign:"center"}}>
+            {room?.guest ? (
+              <>
+                <div style={{fontSize:"1.6rem"}}>{room.guest.avatar}</div>
+                <div style={{fontWeight:700,marginTop:".3rem",fontSize:".9rem"}}>{room.guest.name}</div>
+                <div style={{fontSize:".75rem",marginTop:".2rem",display:"flex",alignItems:"center",justifyContent:"center",gap:4}}>
+                  <span className="online-dot"/><span style={{color:"#42e84a"}}>Joined!</span>
+                </div>
+              </>
+            ) : (
+              <>
+                <div style={{fontSize:"1.6rem",opacity:.3}}>?</div>
+                <div style={{color:T.dim,fontSize:".85rem",marginTop:".3rem"}}>Waiting…</div>
+                <div style={{fontSize:".75rem",marginTop:".2rem",display:"flex",alignItems:"center",justifyContent:"center",gap:4}}>
+                  <span className="waiting-dot"/><span style={{color:T.gold}}>Pending</span>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+
+        <ChatPanel roomCode={code} myName={me.name} partnerName={room?.guest?.name||room?.host?.name} myAvatar={me.avatar}/>
+
+        <div style={{marginTop:"1.2rem",textAlign:"center"}}>
+          <button onClick={onLeave} style={{background:"none",border:"none",color:T.dim,cursor:"pointer",fontSize:".85rem"}}>Leave Room</button>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+// ── GAME LOBBY (pick game) ────────────────────────────────────
+function GameLobby({code,me,role,room,onGameStarted,onLeave}){
+  const [selected,setSelected]=useState(null);
+  const [hov,setHov]=useState(null);
+  const [starting,setStarting]=useState(false);
+  const [liveRoom,setLiveRoom]=useState(room);
+  const pollRef=useRef();
+
+  const isHost=role==="host";
+  const partner=isHost?liveRoom.guest:liveRoom.host;
+
+  const poll=useCallback(async()=>{
+    const r=await getRoom(code);
+    if(!r) return;
+    setLiveRoom(r);
+    if(r.status==="playing"&&r.game) onGameStarted(r);
+  },[code,onGameStarted]);
+
+  useEffect(()=>{
+    poll();
+    pollRef.current=setInterval(poll,2000);
+    return()=>clearInterval(pollRef.current);
+  },[poll]);
+
+  const startGame=async()=>{
+    if(!selected||!isHost||starting) return;
+    setStarting(true);
+    const q=await genQuestion(selected.id,1,[]);
+    const updated={
+      ...liveRoom,status:"playing",
+      game:selected,round:1,phase:"question",
+      question:q,answers:{p1:null,p2:null},
+      scores:{p1:0,p2:0},judgment:null,
+      history:[],usedQs:[q?.question||q?.dare||q?.prompt||q?.starter||q?.scenario||""],
+      winner:null,story:null,
+    };
+    await setRoom(code,updated);
+    onGameStarted(updated);
+    setStarting(false);
+  };
+
+  return (
+    <div style={{maxWidth:900,margin:"0 auto",padding:"2rem 1rem",animation:"fadeUp .4s ease"}}>
+      {/* Header */}
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:"2rem",flexWrap:"wrap",gap:"1rem"}}>
+        <div>
+          <div style={{color:T.muted,fontSize:".8rem",marginBottom:".2rem"}}>Room <span style={{color:T.gold,fontWeight:700,letterSpacing:2}}>{code}</span></div>
+          <h2 style={{fontFamily:"'Playfair Display',serif",color:"white",fontSize:"1.5rem"}}>Choose a Game 🎮</h2>
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:"1rem"}}>
+          <div style={{display:"flex",alignItems:"center",gap:".5rem",background:"rgba(255,255,255,.06)",borderRadius:50,padding:".4rem .9rem"}}>
+            <span style={{fontSize:"1.2rem"}}>{me.avatar}</span>
+            <span style={{color:"white",fontSize:".85rem",fontWeight:600}}>{me.name}</span>
+            <span className="online-dot"/>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:".5rem",background:"rgba(255,255,255,.06)",borderRadius:50,padding:".4rem .9rem"}}>
+            <span style={{fontSize:"1.2rem"}}>{partner?.avatar}</span>
+            <span style={{color:"white",fontSize:".85rem",fontWeight:600}}>{partner?.name}</span>
+            <span className="online-dot"/>
+          </div>
+        </div>
+      </div>
+
+      <div style={{display:"grid",gridTemplateColumns:"1fr 300px",gap:"1.5rem",alignItems:"start"}}>
+        {/* Game grid */}
+        <div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(240px,1fr))",gap:"1rem",marginBottom:"1.2rem"}}>
+            {GAMES.map((g,i)=>{
+              const sel=selected?.id===g.id;
+              return (
+                <div key={g.id} onClick={()=>isHost&&setSelected(g)}
+                  onMouseEnter={()=>setHov(g.id)} onMouseLeave={()=>setHov(null)}
+                  style={{
+                    background:sel?`${g.color}20`:hov===g.id?"rgba(255,255,255,.08)":"rgba(255,255,255,.04)",
+                    border:`2px solid ${sel?g.color:hov===g.id?"rgba(255,255,255,.2)":T.border}`,
+                    borderRadius:16,padding:"1.3rem",cursor:isHost?"pointer":"default",
+                    transition:"all .25s",transform:sel?"translateY(-4px) scale(1.02)":"none",
+                    boxShadow:sel?`0 12px 40px ${g.color}30`:"none",
+                    animation:`fadeUp .4s ease ${i*.06}s both`,
+                  }}>
+                  <div style={{fontSize:"2rem",marginBottom:".5rem"}}>{g.icon}</div>
+                  <Tag color={g.color}>{g.tag}</Tag>
+                  <div style={{fontWeight:700,color:"white",margin:".5rem 0 .2rem",fontSize:"1rem"}}>{g.name}</div>
+                  <div style={{color:T.muted,fontSize:".82rem",lineHeight:1.5}}>{g.desc}</div>
+                  {sel&&<div style={{color:g.color,fontSize:".8rem",fontWeight:700,marginTop:".7rem"}}>✓ Selected</div>}
+                </div>
+              );
+            })}
+          </div>
+
+          {isHost&&(
+            <Btn onClick={startGame} disabled={!selected||starting} color={selected?.color||T.rose} full>
+              {starting
+                ?<span style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8}}><Spinner size={18} color="white"/>Starting game…</span>
+                :selected?`Start "${selected.name}" →`:"← Select a game first"}
+            </Btn>
+          )}
+          {!isHost&&(
+            <div style={{background:`${T.violet}15`,border:`1px solid ${T.violet}30`,borderRadius:12,padding:"1rem",textAlign:"center",color:T.muted,fontSize:".9rem"}}>
+              ⏳ Waiting for {liveRoom.host?.name} to choose and start a game…
+            </div>
+          )}
+        </div>
+
+        {/* Chat sidebar */}
+        <Card style={{padding:"1.2rem"}}>
+          <ChatPanel roomCode={code} myName={me.name} partnerName={partner?.name} myAvatar={me.avatar}/>
+        </Card>
+      </div>
+
+      <div style={{marginTop:"1.2rem",textAlign:"center"}}>
+        <button onClick={onLeave} style={{background:"none",border:"none",color:T.dim,cursor:"pointer",fontSize:".82rem"}}>Leave Room</button>
+      </div>
+    </div>
+  );
+}
+
+// ── GAME SCREEN ───────────────────────────────────────────────
+function GameScreen({code,me,role,initialRoom,onGameEnd}){
+  const [room,setRoomState]=useState(initialRoom);
+  const [myAnswer,setMyAnswer]=useState("");
+  const [myRating,setMyRating]=useState(5);
+  const [myOption,setMyOption]=useState(null);
+  const [submitting,setSubmitting]=useState(false);
+  const [hasSubmitted,setHasSubmitted]=useState(false);
+  const [localPhase,setLocalPhase]=useState(initialRoom.phase);
+  const pollRef=useRef();
+  const processingRef=useRef(false);
+
+  const isHost=role==="host";
+  const myKey=isHost?"p1":"p2";
+  const theirKey=isHost?"p2":"p1";
+  const myProfile=isHost?room.host:room.guest;
+  const theirProfile=isHost?room.guest:room.host;
+  const game=room.game;
+
+  const poll=useCallback(async()=>{
+    const r=await getRoom(code);
+    if(!r||processingRef.current) return;
+    setRoomState(r);
+
+    // Detect phase change — reset local state
+    if(r.phase!==localPhase){
+      setLocalPhase(r.phase);
+      setHasSubmitted(false);
+      setMyAnswer("");
+      setMyOption(null);
+      setMyRating(5);
+    }
+
+    if(r.phase==="done"||r.status==="done") onGameEnd(r);
+
+    // Host only: if both answered and phase is "question", run judging
+    if(isHost && r.phase==="question" && r.answers?.p1!==null && r.answers?.p2!==null && !processingRef.current){
+      processingRef.current=true;
+      clearInterval(pollRef.current);
+      await runJudge(r);
+      processingRef.current=false;
+      pollRef.current=setInterval(poll,2500);
+    }
+  },[code,localPhase,isHost]);
+
+  const runJudge=async(r)=>{
+    const a1=r.answers.p1, a2=r.answers.p2;
+    const j=await judgeRound(game.id,r.question,a1,a2,r.host.name,r.guest.name);
+    const newScores={p1:r.scores.p1+(j.scoreA||0),p2:r.scores.p2+(j.scoreB||0)};
+    const histEntry={round:r.round,question:r.question,a1,a2,judgment:j};
+    const newHistory=[...r.history,histEntry];
+    const isLast=r.round>=5;
+
+    if(isLast){
+      // Generate story
+      const story=await genFinalStory(r.host.name,r.guest.name,game.name,newScores.p1,newScores.p2,newHistory);
+      const winner=newScores.p1>newScores.p2?"host":newScores.p2>newScores.p1?"guest":"tie";
+      await setRoom(code,{...r,phase:"reveal",answers:{p1:a1,p2:a2},scores:newScores,judgment:j,history:newHistory,story,winner,status:"reveal-last"});
+    } else {
+      await setRoom(code,{...r,phase:"reveal",answers:{p1:a1,p2:a2},scores:newScores,judgment:j,history:newHistory});
+    }
+  };
+
+  const advanceRound=async()=>{
+    if(!isHost) return;
+    const r=await getRoom(code);
+    const isLast=r.round>=5;
+    if(isLast||r.status==="reveal-last"){
+      await setRoom(code,{...r,phase:"done",status:"done"});
+      onGameEnd(r);
+      return;
+    }
+    const nextRound=r.round+1;
+    const q=await genQuestion(game.id,nextRound,r.usedQs||[]);
+    const newKey=q?.question||q?.dare||q?.prompt||q?.starter||q?.scenario||"";
+    await setRoom(code,{...r,round:nextRound,phase:"question",question:q,answers:{p1:null,p2:null},judgment:null,usedQs:[...(r.usedQs||[]),newKey]});
+  };
+
+  useEffect(()=>{
+    poll();
+    pollRef.current=setInterval(poll,2500);
+    return()=>clearInterval(pollRef.current);
+  },[poll]);
+
+  const submitAnswer=async()=>{
+    if(hasSubmitted||submitting) return;
+    let val="";
+    if(game.id==="rating") val=String(myRating);
+    else if(game.id==="wouldyou") val=myOption||"";
+    else val=myAnswer.trim();
+    if(!val) return;
+    setSubmitting(true);
+    const r=await getRoom(code);
+    const updated={...r,answers:{...r.answers,[myKey]:val}};
+    await setRoom(code,updated);
+    setHasSubmitted(true);
+    setRoomState(updated);
+    setSubmitting(false);
+  };
+
+  // ── Render question content ──
+  const renderQ=()=>{
+    const q=room.question;
+    if(!q) return null;
+    if(game.id==="trivia") return <>
+      <div style={{color:T.gold,fontSize:".78rem",fontWeight:700,letterSpacing:1,marginBottom:".8rem"}}>📂 {q.category}</div>
+      <div style={{fontSize:"clamp(1.1rem,3vw,1.45rem)",color:"white",lineHeight:1.65,fontWeight:700}}>{q.question}</div>
+      {q.hint&&<div style={{color:T.muted,fontSize:".85rem",fontStyle:"italic",marginTop:".6rem"}}>💡 {q.hint}</div>}
+    </>;
+    if(game.id==="wouldyou") return <>
+      <div style={{color:T.gold,fontSize:".78rem",fontWeight:700,letterSpacing:1,marginBottom:".8rem"}}>🌍 {q.theme}</div>
+      <div style={{fontSize:"clamp(1rem,3vw,1.35rem)",color:"white",lineHeight:1.65,fontWeight:700}}>{q.question}</div>
+    </>;
+    if(game.id==="dare") return <>
+      <div style={{color:T.gold,fontSize:".78rem",fontWeight:700,letterSpacing:1,marginBottom:".8rem"}}>🎭 {q.type} · {q.vibe}</div>
+      <div style={{fontSize:"clamp(1.1rem,3vw,1.4rem)",color:"white",lineHeight:1.65,fontWeight:700}}>{q.dare}</div>
+    </>;
+    if(game.id==="complete") return <>
+      <div style={{color:T.gold,fontSize:".78rem",fontWeight:700,letterSpacing:1,marginBottom:".8rem"}}>✍️ {q.theme}</div>
+      <div style={{fontSize:"clamp(1.1rem,3vw,1.4rem)",color:T.gold,lineHeight:1.65,fontWeight:700,fontStyle:"italic"}}>"{q.starter}"</div>
+      <div style={{color:T.muted,fontSize:".82rem",marginTop:".5rem"}}>Example: {q.example}</div>
+    </>;
+    if(game.id==="rating") return <>
+      <div style={{color:T.gold,fontSize:".78rem",fontWeight:700,letterSpacing:1,marginBottom:".8rem"}}>⭐ {q.category}</div>
+      <div style={{fontSize:"clamp(1.1rem,3vw,1.4rem)",color:"white",lineHeight:1.65,fontWeight:700}}>{q.scenario}</div>
+      {q.context&&<div style={{color:T.muted,fontSize:".85rem",marginTop:".5rem"}}>💭 {q.context}</div>}
+    </>;
+    if(game.id==="memory") return <>
+      <div style={{color:T.gold,fontSize:".78rem",fontWeight:700,letterSpacing:1,marginBottom:".8rem"}}>💌 {q.category}</div>
+      <div style={{fontSize:"clamp(1.1rem,3vw,1.4rem)",color:"white",lineHeight:1.65,fontWeight:700}}>{q.prompt}</div>
+      {q.followUp&&<div style={{color:T.muted,fontSize:".85rem",marginTop:".5rem"}}>Then: {q.followUp}</div>}
+    </>;
+    return <div style={{color:"white"}}>{JSON.stringify(q)}</div>;
+  };
+
+  // ── Render my input ──
+  const renderInput=()=>{
+    if(hasSubmitted) return (
+      <div style={{background:"rgba(66,232,100,.08)",border:"1px solid rgba(66,232,100,.25)",borderRadius:14,padding:"1.2rem",textAlign:"center"}}>
+        <div style={{color:"#42e884",fontWeight:700,fontSize:".95rem"}}>✓ Answer submitted!</div>
+        <div style={{color:T.muted,fontSize:".82rem",marginTop:".3rem"}}>Waiting for {theirProfile?.name}…</div>
+        <div style={{marginTop:".8rem",display:"flex",justifyContent:"center"}}><Spinner color={T.mint} size={22}/></div>
+      </div>
+    );
+
+    if(game.id==="wouldyou") return (
+      <div style={{display:"flex",flexDirection:"column",gap:".7rem"}}>
+        {["A","B"].map(opt=>(
+          <button key={opt} onClick={()=>setMyOption(opt)} style={{padding:".9rem 1.2rem",borderRadius:12,border:`2px solid ${myOption===opt?game.color:"rgba(255,255,255,.15)"}`,background:myOption===opt?`${game.color}22`:"rgba(255,255,255,.04)",color:"white",cursor:"pointer",fontWeight:myOption===opt?700:400,transition:"all .2s",textAlign:"left",fontSize:".92rem"}}>
+            <span style={{color:T.gold,fontWeight:700,marginRight:".5rem"}}>{opt}.</span>
+            {opt==="A"?room.question?.optionA:room.question?.optionB}
+          </button>
+        ))}
+        <Btn onClick={submitAnswer} disabled={!myOption||submitting} color={game.color} full>
+          {submitting?"Locking in…":"Lock In My Choice ✓"}
+        </Btn>
+      </div>
+    );
+
+    if(game.id==="rating") return (
+      <div style={{textAlign:"center"}}>
+        <div style={{fontSize:"4rem",fontWeight:900,color:T.gold,lineHeight:1}}>{myRating}</div>
+        <div style={{color:T.muted,fontSize:".8rem",marginBottom:"1rem"}}>/ 10</div>
+        <input type="range" min={1} max={10} value={myRating} onChange={e=>setMyRating(Number(e.target.value))} style={{width:"100%",accentColor:game.color,marginBottom:"1rem"}}/>
+        <div style={{display:"flex",justifyContent:"space-between",color:T.dim,fontSize:".75rem",marginBottom:"1.2rem"}}>
+          <span>1 😐</span><span>5 😊</span><span>10 😍</span>
+        </div>
+        <Btn onClick={submitAnswer} disabled={submitting} color={game.color} full>
+          {submitting?"Submitting…":"Submit My Rating ✓"}
+        </Btn>
+      </div>
+    );
+
+    // Text answer
+    return (
+      <div>
+        <textarea value={myAnswer} onChange={e=>setMyAnswer(e.target.value)} rows={3}
+          placeholder={game.id==="complete"?"Complete the sentence…":game.id==="dare"?"Describe how it went!":"Type your answer…"}
+          style={{width:"100%",background:"rgba(255,255,255,.07)",border:`2px solid rgba(255,255,255,.2)`,borderRadius:14,padding:"1rem",color:"white",fontSize:"1rem",resize:"none",fontFamily:"'DM Sans',sans-serif",lineHeight:1.6,boxSizing:"border-box"}}
+        />
+        <Btn onClick={submitAnswer} disabled={!myAnswer.trim()||submitting} color={game.color} full style={{marginTop:".8rem"}}>
+          {submitting?"Submitting…":"Submit Answer →"}
+        </Btn>
+      </div>
+    );
+  };
+
+  // ── Render reveal phase ──
+  const renderReveal=()=>{
+    const j=room.judgment;
+    const myScore=isHost?j?.scoreA:j?.scoreB;
+    const theirScore=isHost?j?.scoreB:j?.scoreA;
+    const myAns=room.answers?.[myKey];
+    const theirAns=room.answers?.[theirKey];
+    const isLast=room.round>=5||room.status==="reveal-last";
+    const roundWinner=j?.winner==="tie"?"tie":j?.winner==="p1"?(isHost?"you":"them"):(!isHost?"you":"them");
+
+    return (
+      <div className="popIn">
+        {/* Judgment card */}
+        <div style={{background:`linear-gradient(135deg,rgba(0,0,0,.5),${game.color}25)`,border:`1px solid ${game.color}50`,borderRadius:20,padding:"1.8rem",marginBottom:"1.2rem",boxShadow:`0 0 50px ${game.color}20`}}>
+          <div style={{textAlign:"center",marginBottom:"1.2rem"}}>
+            <div style={{fontSize:"2rem"}}>{roundWinner==="you"?"🏆":roundWinner==="tie"?"🤝":"✨"}</div>
+            <div style={{color:T.gold,fontWeight:700,fontSize:"1.1rem"}}>
+              {roundWinner==="you"?`You won this round! +${myScore}pts`:roundWinner==="tie"?`Tied! Both +${myScore}pts`:`${theirProfile?.name} won. +${myScore}pts`}
+            </div>
+          </div>
+
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:".8rem",marginBottom:"1.2rem"}}>
+            {[{name:myProfile?.name,avatar:myProfile?.avatar,ans:myAns,score:myScore,key:myKey},
+              {name:theirProfile?.name,avatar:theirProfile?.avatar,ans:theirAns,score:theirScore,key:theirKey}
+            ].map((p,i)=>(
+              <div key={i} style={{background:"rgba(0,0,0,.3)",borderRadius:14,padding:"1rem"}}>
+                <div style={{display:"flex",alignItems:"center",gap:".4rem",marginBottom:".4rem"}}>
+                  <span style={{fontSize:"1.2rem"}}>{p.avatar}</span>
+                  <span style={{fontWeight:700,fontSize:".9rem"}}>{p.name}{i===0?" (You)":""}</span>
+                </div>
+                <div style={{color:T.gold,fontSize:"1.4rem",fontWeight:900,marginBottom:".3rem"}}>+{p.score}</div>
+                {p.ans&&<div style={{color:T.muted,fontSize:".8rem",fontStyle:"italic"}}>"{p.ans.slice(0,70)}{p.ans.length>70?"...":""}"</div>}
+              </div>
+            ))}
+          </div>
+
+          <div style={{background:"rgba(255,255,255,.06)",borderRadius:12,padding:"1rem",marginBottom:".8rem",textAlign:"center"}}>
+            <div style={{fontSize:"1.1rem",lineHeight:1.6}}>{j?.reaction}</div>
+          </div>
+          <div style={{textAlign:"center",color:T.blush,fontSize:".88rem",fontStyle:"italic"}}>💡 {j?.insight}</div>
+        </div>
+
+        {/* Running score */}
+        <div style={{display:"flex",gap:".8rem",marginBottom:"1.2rem"}}>
+          {[{name:room.host?.name,avatar:room.host?.avatar,score:room.scores?.p1,key:"host"},
+            {name:room.guest?.name,avatar:room.guest?.avatar,score:room.scores?.p2,key:"guest"}
+          ].map((p,i)=>(
+            <div key={i} style={{flex:1,background:"rgba(255,255,255,.05)",border:`1px solid ${T.border}`,borderRadius:14,padding:"1rem",textAlign:"center"}}>
+              <div style={{fontSize:"1.3rem"}}>{p.avatar}</div>
+              <div style={{fontWeight:700,fontSize:".85rem",marginTop:".2rem"}}>{p.name}</div>
+              <div style={{fontSize:"2rem",fontWeight:900,color:T.gold,lineHeight:1.2}}>{p.score}</div>
+              <div style={{color:T.dim,fontSize:".72rem"}}>total pts</div>
+            </div>
+          ))}
+        </div>
+
+        {isHost?(
+          <Btn onClick={advanceRound} color={game.color} full>
+            {isLast?"🏆 See Final Results!":"Next Round →"}
+          </Btn>
+        ):(
+          <div style={{background:`${T.violet}15`,border:`1px solid ${T.violet}30`,borderRadius:12,padding:".9rem",textAlign:"center",color:T.muted,fontSize:".88rem"}}>
+            ⏳ Waiting for {room.host?.name} to continue…
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const phase=room.phase;
+
+  return (
+    <div style={{maxWidth:820,margin:"0 auto",padding:"1.5rem 1rem",animation:"fadeUp .4s ease"}}>
+      {/* Top bar */}
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:"1.2rem",flexWrap:"wrap",gap:".8rem"}}>
+        <div style={{display:"flex",alignItems:"center",gap:".8rem"}}>
+          <span style={{fontSize:"1.4rem"}}>{game.icon}</span>
+          <div>
+            <div style={{fontWeight:700,color:"white",fontSize:"1rem"}}>{game.name}</div>
+            <div style={{color:T.muted,fontSize:".78rem"}}>Round {room.round} of 5 · Room {code}</div>
+          </div>
+        </div>
+        <div style={{display:"flex",gap:".5rem",alignItems:"center"}}>
+          {[{p:room.host,k:"p1"},{p:room.guest,k:"p2"}].map(({p,k},i)=>(
+            <div key={i} style={{display:"flex",alignItems:"center",gap:".4rem",background:"rgba(255,255,255,.06)",borderRadius:50,padding:".3rem .8rem"}}>
+              <span>{p?.avatar}</span>
+              <span style={{color:"white",fontSize:".8rem",fontWeight:600}}>{p?.name}</span>
+              <span style={{color:T.gold,fontWeight:700,fontSize:".85rem"}}>{room.scores?.[k]}pt</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Progress bar */}
+      <div style={{height:5,background:"rgba(255,255,255,.08)",borderRadius:3,overflow:"hidden",marginBottom:"1.5rem"}}>
+        <div style={{height:"100%",width:`${((room.round-1)/5)*100}%`,background:`linear-gradient(90deg,${game.color},${T.gold})`,borderRadius:3,transition:"width .5s"}}/>
+      </div>
+
+      <div style={{display:"grid",gridTemplateColumns:"1fr 280px",gap:"1.2rem",alignItems:"start"}}>
+        {/* Main game area */}
+        <div>
+          {phase==="question"&&(
+            <>
+              {/* Question card */}
+              <div style={{background:`linear-gradient(135deg,rgba(0,0,0,.4),${game.color}18)`,border:`1px solid ${game.color}35`,borderRadius:20,padding:"2rem",marginBottom:"1.2rem",boxShadow:`0 8px 30px ${game.color}20`}}>
+                <div style={{color:T.gold,fontSize:".75rem",fontWeight:700,letterSpacing:2,textTransform:"uppercase",marginBottom:"1rem"}}>Round {room.round} of 5</div>
+                {room.question?renderQ():<div style={{display:"flex",justifyContent:"center",padding:"1rem"}}><Spinner color={game.color}/></div>}
+              </div>
+
+              {/* Input area */}
+              <Card style={{padding:"1.5rem"}}>
+                <div style={{color:T.blush,fontSize:".85rem",fontWeight:700,marginBottom:"1rem",textAlign:"center"}}>
+                  {game.id==="wouldyou"?"🤫 Pick secretly — partner can't see yet":game.id==="rating"?"⭐ Rate independently":"✍️ Your answer (partner can't see until both submit)"}
+                </div>
+
+                {/* Waiting for other player check */}
+                {room.answers?.[theirKey]!==null&&!hasSubmitted&&(
+                  <div style={{background:`${T.gold}15`,border:`1px solid ${T.gold}30`,borderRadius:10,padding:".7rem",textAlign:"center",color:T.gold,fontSize:".82rem",marginBottom:".8rem",fontWeight:600}}>
+                    ⚡ {theirProfile?.name} has already answered! Your turn!
+                  </div>
+                )}
+
+                {renderInput()}
+              </Card>
+            </>
+          )}
+
+          {phase==="reveal"&&renderReveal()}
+
+          {phase==="judging"&&(
+            <div style={{textAlign:"center",padding:"3rem 1rem"}}>
+              <div style={{marginBottom:"1rem",display:"flex",justifyContent:"center"}}><Spinner color={game.color} size={44}/></div>
+              <div style={{color:T.muted,fontSize:".95rem"}}>AI judge is reviewing your answers… ⚖️</div>
+            </div>
+          )}
+        </div>
+
+        {/* Chat sidebar */}
+        <div style={{position:"sticky",top:"1rem"}}>
+          <Card style={{padding:"1.2rem"}}>
+            <ChatPanel roomCode={code} myName={me.name} partnerName={theirProfile?.name} myAvatar={me.avatar}/>
+          </Card>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── FINAL RESULTS ─────────────────────────────────────────────
+function FinalResults({room,me,role,code,onPlayAgain,onHome}){
+  const isHost=role==="host";
+  const myScore=isHost?room.scores.p1:room.scores.p2;
+  const theirScore=isHost?room.scores.p2:room.scores.p1;
+  const theirProfile=isHost?room.guest:room.host;
+  const myProfile=isHost?room.host:room.guest;
+  const winner=room.scores.p1>room.scores.p2?"p1":room.scores.p2>room.scores.p1?"p2":"tie";
+  const iWon=(winner==="p1"&&isHost)||(winner==="p2"&&!isHost);
+  const tied=winner==="tie";
+
+  const playAgain=async()=>{
+    if(!isHost) return;
+    await setRoom(code,{...room,status:"ready",game:null,round:1,phase:"lobby",question:null,answers:{p1:null,p2:null},scores:{p1:0,p2:0},judgment:null,history:[],usedQs:[],winner:null,story:null});
+    onPlayAgain();
+  };
+
+  return (
+    <div style={{maxWidth:640,margin:"0 auto",padding:"2rem 1rem",animation:"popIn .5s ease"}}>
+      <Card glow={iWon?T.gold:T.violet} style={{textAlign:"center"}}>
+        <div style={{fontSize:"3.5rem",marginBottom:".5rem"}}>{tied?"🤝":iWon?"🏆":"💖"}</div>
+        <h2 style={{fontFamily:"'Playfair Display',serif",color:T.gold,fontSize:"2rem",marginBottom:".3rem"}}>
+          {tied?"Perfect Tie!":iWon?"You Won! 🎉":`${theirProfile?.name} Wins! 💕`}
+        </h2>
+        <p style={{color:T.muted,fontSize:".9rem",marginBottom:"2rem"}}>{room.game?.name} · 5 rounds complete</p>
+
+        {/* Scores */}
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"1rem",marginBottom:"2rem"}}>
+          {[{p:myProfile,score:myScore,label:"You"},{p:theirProfile,score:theirScore,label:"Partner"}].map((x,i)=>(
+            <div key={i} style={{background:"rgba(255,255,255,.06)",borderRadius:14,padding:"1.3rem"}}>
+              <div style={{fontSize:"1.8rem"}}>{x.p?.avatar}</div>
+              <div style={{fontWeight:700,marginTop:".3rem"}}>{x.p?.name}</div>
+              <div style={{fontSize:"2.8rem",fontWeight:900,color:T.gold,lineHeight:1.1}}>{x.score}</div>
+              <div style={{color:T.dim,fontSize:".75rem"}}>points</div>
+            </div>
+          ))}
+        </div>
+
+        {/* AI Story */}
+        {room.story&&(
+          <div style={{background:"rgba(255,170,200,.07)",border:"1px solid rgba(255,170,200,.2)",borderRadius:14,padding:"1.5rem",marginBottom:"2rem",textAlign:"left"}}>
+            <div style={{color:T.blush,fontWeight:700,fontSize:".82rem",marginBottom:".6rem",letterSpacing:.5}}>✨ YOUR GAME STORY</div>
+            <p style={{color:"rgba(240,234,255,.75)",lineHeight:1.8,fontSize:".92rem",fontStyle:"italic"}}>{room.story}</p>
+          </div>
+        )}
+
+        {/* Round recap */}
+        <div style={{textAlign:"left",marginBottom:"2rem"}}>
+          <div style={{color:T.dim,fontSize:".8rem",fontWeight:700,marginBottom:".8rem",letterSpacing:.8}}>ROUND RECAP</div>
+          {room.history?.map((h,i)=>(
+            <div key={i} style={{background:"rgba(255,255,255,.04)",borderRadius:10,padding:".9rem",marginBottom:".5rem",borderLeft:`3px solid ${room.game?.color}`}}>
+              <div style={{color:T.gold,fontSize:".75rem",marginBottom:".3rem"}}>Round {h.round}</div>
+              <div style={{color:"rgba(240,234,255,.6)",fontSize:".82rem",marginBottom:".3rem"}}>{h.question?.question||h.question?.dare||h.question?.prompt||h.question?.starter||h.question?.scenario}</div>
+              <div style={{display:"flex",gap:"1rem",fontSize:".78rem",flexWrap:"wrap"}}>
+                <span style={{color:T.blush}}>{room.host?.avatar} "{h.a1?.slice(0,35)}{h.a1?.length>35?"...":""}" (+{h.judgment?.scoreA})</span>
+                <span style={{color:"#c084fc"}}>{room.guest?.avatar} "{h.a2?.slice(0,35)}{h.a2?.length>35?"...":""}" (+{h.judgment?.scoreB})</span>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div style={{display:"flex",gap:".8rem",justifyContent:"center",flexWrap:"wrap"}}>
+          {isHost&&<Btn onClick={playAgain} color={room.game?.color||T.rose}>🔄 Play Again</Btn>}
+          <Btn onClick={onHome} color={T.violet} outline>🏠 Home</Btn>
+        </div>
+        {!isHost&&<p style={{color:T.dim,fontSize:".8rem",marginTop:"1rem"}}>Ask {room.host?.name} to start a new game!</p>}
+      </Card>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════
+//  ROOT APP
+// ══════════════════════════════════════════════════════════════
+export default function App(){
+  const [screen,setScreen]=useState("home");
+  const [code,setCode]=useState(null);
+  const [me,setMe]=useState(null);
+  const [role,setRole]=useState(null);
+  const [room,setRoom]=useState(null);
+
+  const reset=()=>{ setScreen("home"); setCode(null); setMe(null); setRole(null); setRoom(null); };
+
+  return (
+    <div style={{minHeight:"100vh",background:`radial-gradient(ellipse at 20% 10%,#1e0a35 0%,${T.bg} 60%)`,fontFamily:"'DM Sans',sans-serif",color:T.text,overflowX:"hidden",position:"relative"}}>
+      <style>{CSS}</style>
+      <Particles/>
+
+      {/* Top nav */}
+      <div style={{position:"sticky",top:0,zIndex:100,background:"rgba(13,8,21,.85)",backdropFilter:"blur(20px)",borderBottom:"1px solid rgba(200,160,255,.08)",padding:".8rem 1.5rem",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+        <div onClick={reset} style={{cursor:"pointer",display:"flex",alignItems:"center",gap:".5rem"}}>
+          <span className="heartbeat" style={{fontSize:"1.3rem"}}>💑</span>
+          <span style={{fontFamily:"'Playfair Display',serif",fontWeight:900,fontSize:"1.2rem",background:`linear-gradient(90deg,${T.blush},${T.gold})`,WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}}>LovePlay</span>
+        </div>
+        {code&&<div style={{display:"flex",alignItems:"center",gap:".6rem"}}>
+          <span style={{color:T.dim,fontSize:".78rem"}}>Room</span>
+          <span style={{color:T.gold,fontWeight:700,letterSpacing:2,fontSize:".9rem"}}>{code}</span>
+          <span className="online-dot"/>
+        </div>}
+        <div style={{color:T.dim,fontSize:".78rem"}}>Long Distance Mode 🌍</div>
+      </div>
+
+      <div style={{position:"relative",zIndex:1}}>
+        {screen==="home"&&<HomeScreen onHost={()=>setScreen("host-setup")} onJoin={()=>setScreen("guest-join")}/>}
+
+        {screen==="host-setup"&&(
+          <HostSetupScreen
+            onBack={()=>setScreen("home")}
+            onCreated={(c,player,r)=>{ setCode(c); setMe(player); setRole(r); setScreen("waiting"); }}
+          />
+        )}
+
+        {screen==="guest-join"&&(
+          <GuestJoinScreen
+            onBack={()=>setScreen("home")}
+            onJoined={(c,player,r)=>{ setCode(c); setMe(player); setRole(r); setScreen("lobby"); }}
+          />
+        )}
+
+        {screen==="waiting"&&code&&me&&(
+          <WaitingRoom
+            code={code} me={me} role={role}
+            onRoomReady={(r)=>{ setRoom(r); setScreen("lobby"); }}
+            onLeave={reset}
+          />
+        )}
+
+        {screen==="lobby"&&code&&me&&(
+          <GameLobby
+            code={code} me={me} role={role} room={room}
+            onGameStarted={(r)=>{ setRoom(r); setScreen("game"); }}
+            onLeave={reset}
+          />
+        )}
+
+        {screen==="game"&&code&&me&&room&&(
+          <GameScreen
+            code={code} me={me} role={role} initialRoom={room}
+            onGameEnd={(r)=>{ if(r){ setRoom(r); setScreen("results"); } else reset(); }}
+          />
+        )}
+
+        {screen==="results"&&room&&(
+          <FinalResults
+            room={room} me={me} role={role} code={code}
+            onPlayAgain={()=>setScreen("lobby")}
+            onHome={reset}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
