@@ -10,10 +10,47 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700;900&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet" />
 
+  <!-- Firebase -->
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
+
   <!-- React + Babel -->
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <script>
+    // ─────────────────────────────────────────────────────────────
+    //  🔥 FIREBASE CONFIG — Replace these values with your own!
+    //
+    //  HOW TO GET YOUR CONFIG:
+    //  1. Go to https://console.firebase.google.com
+    //  2. Click "Add project" → name it "loveplay" → Create
+    //  3. Click the </> (Web) icon to register a web app
+    //  4. Copy the firebaseConfig object shown and paste it below
+    //  5. In Firebase console → Build → Realtime Database → Create database
+    //     → Start in TEST MODE → Enable
+    //  6. Done! Both players can now sync in real time across devices.
+    // ─────────────────────────────────────────────────────────────
+    const firebaseConfig = {
+      apiKey:            "YOUR_API_KEY",
+      authDomain:        "YOUR_PROJECT.firebaseapp.com",
+      databaseURL:       "https://YOUR_PROJECT-default-rtdb.firebaseio.com",
+      projectId:         "YOUR_PROJECT",
+      storageBucket:     "YOUR_PROJECT.appspot.com",
+      messagingSenderId: "YOUR_SENDER_ID",
+      appId:             "YOUR_APP_ID"
+    };
+
+    let db = null;
+    try {
+      firebase.initializeApp(firebaseConfig);
+      db = firebase.database();
+      console.log("✅ Firebase connected — true cross-device multiplayer active!");
+    } catch(e) {
+      console.warn("⚠️ Firebase not configured. Falling back to localStorage (same-browser only).", e.message);
+    }
+  </script>
 
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -103,22 +140,35 @@
       { id:"memory",   icon:"💌", name:"Our Love Story",     tag:"Romantic",  color:T.blush,  desc:"Relive your shared memories" },
     ];
 
-    /* ── STORAGE (localStorage for cross-device via shared room codes) ── */
-    // NOTE: For true cross-device real-time, you need a backend.
-    // This version uses localStorage + BroadcastChannel for same-browser testing,
-    // and a simple polling approach. For production cross-device use,
-    // replace storeSet/storeGet with Firebase/Supabase calls.
+    /* ── STORAGE: Firebase Realtime DB (cross-device) with localStorage fallback ── */
 
-    function storeSet(key, val) {
+    async function storeSet(key, val) {
+      const safeKey = key.replace(/[.#$[\]]/g, "_");
+      if (window.db) {
+        try { await window.db.ref(safeKey).set(val); return; } catch(e) { console.warn("Firebase write failed, using localStorage", e); }
+      }
       try { localStorage.setItem(key, JSON.stringify(val)); } catch(e) {}
     }
-    function storeGet(key) {
+
+    async function storeGet(key) {
+      const safeKey = key.replace(/[.#$[\]]/g, "_");
+      if (window.db) {
+        try {
+          const snap = await window.db.ref(safeKey).get();
+          return snap.exists() ? snap.val() : null;
+        } catch(e) { console.warn("Firebase read failed, using localStorage", e); }
+      }
       try {
         const r = localStorage.getItem(key);
         return r ? JSON.parse(r) : null;
       } catch { return null; }
     }
-    function storeDel(key) {
+
+    async function storeDel(key) {
+      const safeKey = key.replace(/[.#$[\]]/g, "_");
+      if (window.db) {
+        try { await window.db.ref(safeKey).remove(); return; } catch(e) {}
+      }
       try { localStorage.removeItem(key); } catch(e) {}
     }
 
@@ -176,9 +226,12 @@ Be playful, never negative. Celebrate their uniqueness.`;
       );
     }
 
+    /* Expose Firebase db globally for storage functions */
+    if (typeof db !== "undefined") window.db = db;
+
     /* ── ROOM HELPERS ── */
-    async function getRoom(code) { return storeGet(`room:${code}:state`); }
-    async function setRoom(code, data) { storeSet(`room:${code}:state`, data); }
+    async function getRoom(code) { return await storeGet(`room_${code}_state`); }
+    async function setRoom(code, data) { await storeSet(`room_${code}_state`, data); }
 
     /* ── SHARED UI COMPONENTS ── */
     function Btn({children, onClick, color=T.violet, disabled, style:sx={}, outline, sm, full}) {
@@ -282,7 +335,7 @@ Be playful, never negative. Celebrate their uniqueness.`;
       const pollRef = useRef();
 
       const loadMsgs = useCallback(async()=>{
-        const data = storeGet(`room:${roomCode}:chat`);
+        const data = await storeGet(`room_${roomCode}_chat`);
         if (data && Array.isArray(data)) setMsgs(data);
       },[roomCode]);
 
@@ -298,9 +351,9 @@ Be playful, never negative. Celebrate their uniqueness.`;
         if (!draft.trim()||sending) return;
         setSending(true);
         const newMsg = {id:Date.now(),from:myName,avatar:myAvatar,text:draft.trim(),ts:Date.now()};
-        const current = storeGet(`room:${roomCode}:chat`) || [];
+        const current = await storeGet(`room_${roomCode}_chat`) || [];
         const updated = [...current, newMsg].slice(-60);
-        storeSet(`room:${roomCode}:chat`, updated);
+        await storeSet(`room_${roomCode}_chat`, updated);
         setMsgs(updated);
         setDraft("");
         setSending(false);
